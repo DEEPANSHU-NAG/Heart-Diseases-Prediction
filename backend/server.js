@@ -2,14 +2,13 @@ import dotenv from "dotenv";
 dotenv.config();
 import express from "express";
 import mongoose from "mongoose";
-import axios from "axios"; // Used to talk to Python
 import cors from "cors";
-import argon2 from "argon2"; // <--- Added Argon2
+import argon2 from "argon2";
 
 const app = express();
 
 // Middleware
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
 app.use(cors());
 
 // 1. Connect to MongoDB
@@ -18,17 +17,26 @@ mongoose
   .then(() => console.log("MongoDB Connected"))
   .catch((err) => console.log(err));
 
-// --- SCHEMAS ---
+// ==========================================
+// SCHEMAS
+// ==========================================
 
-// 2a. User Schema (New)
 const UserSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
-  password: { type: String, required: true }, // Stores the hash
+  password: { type: String, required: true },
 });
 const User = mongoose.model("User", UserSchema);
 
-// 2b. Patient Schema (Existing)
+const AdminSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+});
+const Admin = mongoose.model("Admin", AdminSchema);
+
+// --- PATIENT SCHEMA (Strictly Data Only) ---
 const PatientSchema = new mongoose.Schema({
+  username: String, // Doctor/User who saved it
+  patient_name: String, // ✅ Added Patient Name
   age: Number,
   sex: Number,
   cp: Number,
@@ -42,28 +50,26 @@ const PatientSchema = new mongoose.Schema({
   slope: Number,
   ca: Number,
   thal: Number,
-  prediction_result: Number, // 0 or 1
-  confidence_score: Array,
+  prediction_result: Number,
+  disease_name: String,
   timestamp: { type: Date, default: Date.now },
+  // ❌ pdf_report is NOT here, so it cannot be saved
 });
 
 const Patient = mongoose.model("Patient", PatientSchema);
 
-// --- AUTH ROUTES ---
+// ==========================================
+// AUTH ROUTES
+// ==========================================
 
-// Signup Route
 app.post("/api/signup", async (req, res) => {
   try {
     const { username, password } = req.body;
-
-    // Check if user exists
     const existingUser = await User.findOne({ username });
     if (existingUser)
       return res.json({ success: false, message: "User already exists" });
 
-    // Hash password with Argon2
     const hashedPassword = await argon2.hash(password);
-
     const newUser = new User({ username, password: hashedPassword });
     await newUser.save();
 
@@ -73,18 +79,13 @@ app.post("/api/signup", async (req, res) => {
   }
 });
 
-// Login Route
 app.post("/api/login", async (req, res) => {
   try {
     const { username, password } = req.body;
-
-    // Find user
     const user = await User.findOne({ username });
     if (!user) return res.json({ success: false, message: "User not found" });
 
-    // Verify password with Argon2
     const validPassword = await argon2.verify(user.password, password);
-
     if (validPassword) {
       res.json({
         success: true,
@@ -99,64 +100,100 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// --- PREDICTION ROUTE ---
-
-// 3. The Route
-app.post("/api/check-heart", async (req, res) => {
+// Admin Auth
+app.post("/api/admin/signup", async (req, res) => {
   try {
-    const inputData = req.body;
+    const { username, password, secretKey } = req.body;
+    if (secretKey !== "admin123")
+      return res.json({ success: false, message: "Invalid Secret Key" });
 
-    // Prepare the array for Python (Order matters! Must match training)
-    const featureArray = [
-      inputData.age,
-      inputData.sex,
-      inputData.cp,
-      inputData.trestbps,
-      inputData.chol,
-      inputData.fbs,
-      inputData.restecg,
-      inputData.thalach,
-      inputData.exang,
-      inputData.oldpeak,
-      inputData.slope,
-      inputData.ca,
-      inputData.thal,
-    ];
+    const existingAdmin = await Admin.findOne({ username });
+    if (existingAdmin)
+      return res.json({ success: false, message: "Admin exists" });
 
-    // A. Call the Python API
-    // We use localhost:5000 where Flask is running
-    const pythonResponse = await axios.post(
-      "http://localhost:5000/predict_api",
-      {
-        features: featureArray,
-      }
-    );
+    const hashedPassword = await argon2.hash(password);
+    const newAdmin = new Admin({ username, password: hashedPassword });
+    await newAdmin.save();
 
-    const prediction = pythonResponse.data.prediction;
-    const confidence = pythonResponse.data.confidence;
+    res.json({ success: true, message: "Admin created" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 
-    // B. Save to MongoDB
+app.post("/api/admin/login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const admin = await Admin.findOne({ username });
+    if (!admin) return res.json({ success: false, message: "Admin not found" });
+
+    const validPassword = await argon2.verify(admin.password, password);
+    if (validPassword) {
+      res.json({
+        success: true,
+        message: "Login successful",
+        username: admin.username,
+      });
+    } else {
+      res.json({ success: false, message: "Invalid password" });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ==========================================
+// DATA ROUTES
+// ==========================================
+
+// 1. Save Report (Data ONLY, No PDF)
+app.post("/api/save-report", async (req, res) => {
+  try {
+    const data = req.body;
+
     const newPatient = new Patient({
-      ...inputData,
-      prediction_result: prediction,
-      confidence_score: confidence,
+      username: data.username,
+      patient_name: data.patient_name, // ✅ Save Patient Name
+      age: data.age,
+      sex: data.sex,
+      cp: data.cp,
+      trestbps: data.trestbps,
+      chol: data.chol,
+      fbs: data.fbs,
+      restecg: data.restecg,
+      thalach: data.thalach,
+      exang: data.exang,
+      oldpeak: data.oldpeak,
+      slope: data.slope,
+      ca: data.ca,
+      thal: data.thal,
+      prediction_result: data.prediction,
+      disease_name: data.disease,
+      // ❌ No PDF field here
     });
 
     await newPatient.save();
 
-    // C. Respond to Frontend
     res.json({
-      message: "Success",
-      data: newPatient,
-      risk: prediction === 1 ? "High Risk" : "Low Risk",
+      success: true,
+      message: "Patient clinical data saved successfully!",
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).send("Error processing request");
+    console.error("Save Error:", error);
+    res.status(500).json({ success: false, message: "Failed to save data." });
   }
 });
 
-// Run Node Server on Port 3000
+// 2. Admin: Get All Patients
+app.get("/api/admin/patients", async (req, res) => {
+  try {
+    const patients = await Patient.find().sort({ timestamp: -1 });
+    res.json({ success: true, data: patients });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Error fetching data" });
+  }
+});
+
 app.listen(3000, () => {
   console.log("Node Server running on port 3000");
 });
